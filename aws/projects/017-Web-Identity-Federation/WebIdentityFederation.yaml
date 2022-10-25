@@ -1,0 +1,485 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description:  You will be implementing a simple serverless application which uses Web Identity Federation.
+Parameters:
+
+  DomainRoot:
+    Type: AWS::Route53::HostedZone::Id
+    Description: The DNS name of an existing Amazon Route 53 hosted zone e.g. clarusway.us
+  FullDomain:
+    Type: String
+    Description: The full domain name e.g. capstone.clarusway.us
+    AllowedPattern: (?!-)[a-zA-Z0-9-.]{1,63}(?<!-)
+    ConstraintDescription: must be a valid DNS zone name.
+    Default:        cognito.mehmetafsar.net
+  CognitoEc2Domain:
+    Type: String
+    Description: The full domain name e.g. capstone.clarusway.us
+    AllowedPattern: (?!-)[a-zA-Z0-9-.]{1,63}(?<!-)
+    ConstraintDescription: must be a valid DNS zone name.
+    Default:        clarusway.mehmetafsar.net
+  CognitoDomain:
+    Type: String
+    MinLength: 3
+    MaxLength: 63
+    AllowedPattern: ^[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?$
+    Description: Enter a string. Must be alpha numeric 3-63 in length.
+    Default:        mehmetafsar
+  Env:
+    Description: Choose the environment to create
+    Type: String
+    Default: development
+    AllowedValues:
+      - development
+      - staging
+      - production
+  Ec2ImageId:
+    Description: AMI ID
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+  Ec2KeyName:
+    Description: Ec2 SSH KEY
+    Type: AWS::EC2::KeyPair::KeyName
+  InstanceType:
+    Description: WebServer EC2 instance type
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t1.micro
+      - t2.micro
+      - m1.small
+      - m1.medium
+      - m1.large
+      - m1.xlarge
+      - m2.xlarge
+      - m2.2xlarge
+      - m2.4xlarge
+      - m3.xlarge
+      - m3.2xlarge
+      - c1.medium
+      - c1.xlarge
+    ConstraintDescription: must be a valid EC2 instance type.
+Mappings:
+  AWSRegionArch2AMI:
+    us-east-1:
+      '64': ami-013f17f36f8b1fefb
+    us-east-2:
+      '64': ami-03657b56516ab7912
+    us-west-1:
+      '64': ami-0e4035ae3f70c400f 
+    us-west-2:
+      '64': ami-01fee56b22f308154
+    eu-central-1:
+      '64': ami-00a205cb8e06c3c4e
+    eu-central-2:
+      '64': ami-0bb3fad3c0286ebd5
+
+Resources:
+  Ec2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Ec2 SecurityGroup
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+  Ec2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+  Ec2Policy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: Ec2RolePolicies
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - ssm:StartSession
+            Resource:
+              - '*'
+      Roles:
+        - !Ref 'Ec2Role'
+
+  Ec2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    DependsOn: Ec2Role
+    Properties:
+      Path: /
+      Roles:
+        - !Ref 'Ec2Role'
+
+  MyEc2Logs:
+    Type: "AWS::EC2::Instance"
+    Properties:     
+      SecurityGroupIds:
+        - !Ref 'Ec2SecurityGroup'
+      Tags:
+        - Key: Env
+          Value: !Ref 'Env'
+        - Key: Name
+          Value: !Sub '${AWS::StackName}'
+      IamInstanceProfile: !Ref 'Ec2InstanceProfile'
+      KeyName: !Ref 'Ec2KeyName'
+      ImageId: !Ref Ec2ImageId
+      Monitoring: true
+      InstanceType: t2.micro
+      UserData: 
+        Fn::Base64:
+          !Sub | 
+            #!/bin/bash -xe
+            yum update -y
+            amazon-linux-extras install docker -y
+            systemctl start docker
+            systemctl enable docker
+            usermod -a -G docker ec2-user
+            newgrp docker
+            yum install python3 -y
+            yum install git -y
+            cd /home/ec2-user
+            wget https://github.com/mehmetafsar510/aws_devops/raw/master/aws/projects/017-Web-Identity-Federation/cognito.zip
+            unzip cognito.zip
+            cd /home/ec2-user/templates
+            sed -i "s|'change me'|'https://${CognitoDomain}.auth.us-east-1.amazoncognito.com/login?client_id=${CognitoUserPoolClient}\&response_type=code\&scope=email+openid+phone+profile\&redirect_uri=https://${FullDomain}'|g" enter.html
+            cd /home/ec2-user
+            sed -i "s|'MAKE SURE YOU REPLACE THIS'|'${CognitoId}'|g" scripts.js
+            aws s3 cp ./scripts.js s3://staticwebcognito-2514
+            aws s3 cp ./index.html s3://staticwebcognito-2514
+            aws s3 cp ./patches1.jpg s3://staticwebcognitoprivate-2514
+            aws s3 cp ./patches2.jpg s3://staticwebcognitoprivate-2514
+            aws s3 cp ./patches3.jpg s3://staticwebcognitoprivate-2514
+            docker build -t mehmet .
+            docker run -d --name=mehmetweb -p 80:80 mehmet:latest
+  
+  myDNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref DomainRoot
+      Comment: DNS name for my instance.
+      Name: !Ref CognitoEc2Domain
+      Type: A
+      TTL: 900
+      ResourceRecords:
+      - !GetAtt MyEc2Logs.PublicIp
+  OriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Sub Static assets in ${AWS::StackName}
+
+  appbucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: staticwebcognito-2514
+      AccessControl: PublicRead
+      LifecycleConfiguration:
+        Rules:
+          - Id: NoncurrentVersionExpiration
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 45
+      VersioningConfiguration:
+        Status: Enabled
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+      Tags:
+        - Key: CloudFormationArn
+          Value: !Sub '${AWS::StackName}'
+
+  WebBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref appbucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+            Resource: !Join
+              - ""
+              - - !GetAtt appbucket.Arn
+                - "/*"
+            Principal:
+              CanonicalUser: !GetAtt OriginAccessIdentity.S3CanonicalUserId
+
+  SSLCert:
+    Type: "AWS::CertificateManager::Certificate"
+    Properties:
+      CertificateTransparencyLoggingPreference: ENABLED
+      DomainName: !Ref FullDomain #required
+      DomainValidationOptions:
+        - DomainName: !Ref FullDomain
+          HostedZoneId: !Ref DomainRoot
+      ValidationMethod: DNS
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        HttpVersion: http2
+        PriceClass: PriceClass_100
+        ViewerCertificate: 
+            AcmCertificateArn: !Ref SSLCert
+            MinimumProtocolVersion: TLSv1.2_2019
+            SslSupportMethod: sni-only
+        IPV6Enabled: true
+        Aliases: 
+          - !Ref FullDomain
+        DefaultRootObject: index.html
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - HEAD
+            - GET
+            - OPTIONS
+          Compress: true
+          ForwardedValues:
+            QueryString: true
+            Cookies:
+              Forward: none
+          DefaultTTL: 1800
+          ViewerProtocolPolicy: redirect-to-https
+          TargetOriginId: Bucket
+        Origins:
+          - Id: Bucket
+            DomainName: !GetAtt appbucket.DomainName
+            S3OriginConfig:
+              OriginAccessIdentity: !Join
+                - /
+                - - origin-access-identity
+                  - cloudfront
+                  - !Ref OriginAccessIdentity
+
+
+  FullDomainRecords:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneId: !Ref DomainRoot
+      RecordSets: 
+        - Name: !Ref FullDomain
+          Type: A
+          AliasTarget:
+            HostedZoneId: Z2FDTNDATAQYW2
+            DNSName: !GetAtt Distribution.DomainName
+  patchesprivatebucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: staticwebcognitoprivate-2514
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ['*']
+            AllowedMethods: ['GET', 'HEAD']
+            AllowedOrigins: ['*']
+  privatepatchespolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Permissions to List contents of the privatepatches bucket
+      ManagedPolicyName: "PrivatePatchesPermissions"
+      Path: /
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - 
+            Sid: ReadFromLCBucket
+            Effect: Allow
+            Action:
+              - "s3:ListBucket"
+              - "s3:GetObject"
+            Resource:
+              - !Sub "arn:aws:s3:::${patchesprivatebucket}"
+              - !Sub "arn:aws:s3:::${patchesprivatebucket}/*"
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UsernameConfiguration: 
+        CaseSensitive: false
+      AutoVerifiedAttributes:
+        - email
+      UserPoolName: !Sub ${CognitoDomain}-user-pool
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: false
+          Required: true
+          
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: True
+          RequireNumbers: True
+          RequireSymbols: False
+          RequireUppercase: True
+     
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: real-time-account-activity-report
+      GenerateSecret: False
+      WriteAttributes:
+        - email
+      ReadAttributes:
+        - email
+      RefreshTokenValidity: 1
+      UserPoolId: !Ref UserPool
+      AllowedOAuthFlowsUserPoolClient: true
+      CallbackURLs:
+        - !Join
+            - ''
+            - - 'https://'
+              - !Ref FullDomain
+              
+      AllowedOAuthFlows:
+        - code
+        - implicit
+      AllowedOAuthScopes:
+        - phone
+        - email
+        - openid
+        - profile
+      SupportedIdentityProviders:
+        - COGNITO
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Ref CognitoDomain
+      UserPoolId: !Ref UserPool
+
+  CognitoUserPoolIdentityProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    Properties: 
+      ProviderName: Google
+      AttributeMapping:
+        email: drmehmet510@gmail.com
+      ProviderDetails:
+        client_id: 196241540610-qbm06dq2rvfh6aeirabaua38206uq27l.apps.googleusercontent.com
+        client_secret: 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
+        authorize_scopes: email openid
+      ProviderType: Google
+      UserPoolId: 
+        Ref: UserPool
+
+  CognitoId:
+    Type: "AWS::Cognito::IdentityPool"
+    Properties:
+     "AllowUnauthenticatedIdentities": false
+     "SupportedLoginProviders": { "accounts.google.com": "196241540610-qbm06dq2rvfh6aeirabaua38206uq27l.apps.googleusercontent.com" }
+
+  CognitoIdentityPoolRoleAttachment:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties:
+      IdentityPoolId: !Sub '${CognitoId}'
+      Roles:
+        unauthenticated: !GetAtt UnauthenticatedUserRole.Arn
+        authenticated: !GetAtt AuthenticatedUserRole.Arn
+  AuthenticatedUserRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated:
+               - cognito-identity.amazonaws.com
+            Action:
+              - sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                cognito-identity.amazonaws.com:aud: !Sub '${CognitoId}'
+              ForAnyValue:StringLike:
+                cognito-identity.amazonaws.com:amr: authenticated
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "cognito-sync:*"
+                  - "cognito-identity:*"
+                  - "mobileanalytics:*"
+                Resource: "*"
+              - 
+                Sid: ReadFromLCBucket
+                Effect: Allow
+                Action:
+                  - "s3:ListBucket"
+                  - "s3:GetObject"
+                Resource:
+                  - !Sub "arn:aws:s3:::${patchesprivatebucket}"
+                  - !Sub "arn:aws:s3:::${patchesprivatebucket}/*"
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: F3
+            reason: "This is a access Policy."
+
+  UnauthenticatedUserRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated:
+                - cognito-identity.amazonaws.com
+            Action:
+              - sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                "cognito-identity.amazonaws.com:aud": !Ref CognitoId
+              ForAnyValue:StringLike:
+                "cognito-identity.amazonaws.com:amr": unauthenticated
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "mobileanalytics:PutEvents"
+                  - "cognito-sync:*"
+                Resource: "*"
+Outputs:
+  FullDomainname:
+    Value: !Join 
+      - ''
+      - - 'https://'
+        - !Ref FullDomain
+    Description: app bucket URL for Google
+  Ec2Domainname:
+    Value: !Join 
+      - ''
+      - - 'http://'
+        - !Ref CognitoEc2Domain
+    Description: URL for Cognito html page
+  HostedUIURL:
+    Value: !Sub https://${CognitoDomain}.auth.us-east-1.amazoncognito.com/login?client_id=${CognitoUserPoolClient}&response_type=code&scope=email+openid+phone+profile&redirect_uri=https://${FullDomain}
+    Description: The hosted UI URL

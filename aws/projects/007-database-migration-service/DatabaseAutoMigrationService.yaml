@@ -1,0 +1,1033 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  This CloudFormation creates the VPC, DMS, RDS resources required for demonstrating the
+  automated serverless way to run DMS tasks for data migration. 
+Metadata:
+  LICENSE: Apache License Version 2.0
+Parameters:
+  ReplicationTaskIdentifier:
+    Default: ec2db-rds-dms
+    Description: AWS DMS Replication Task name used for this blog
+    Type: String
+  UseExistingReplicationTask: 
+    Default: "no"
+    Type: String
+    Description: Specify yes to use existing replication task to test this solution
+    AllowedValues:
+      - "yes"
+      - "no"
+  MigrationRefreshIndicator:
+    Description: Please choose between migration and refresh options
+    Default: data-refresh
+    AllowedValues:
+      - data-migration
+      - data-refresh
+    Type: String
+  MigrationRefreshType:
+    Description: Please choose type of migration / refresh (must match with that of replication task)
+    Default: full-load
+    AllowedValues:
+      - full-load
+      #- full-load-and-cdc
+      #- cdc
+    Type: String
+  StartReplicationTaskType:
+    Type: String
+    Description: The type of replication task
+    AllowedValues:
+      #- start-replication
+      #- resume-processing
+      - reload-target
+    Default: reload-target
+  CdcStartTime:
+    Type: String
+    Description: Indicates the start time for a change data capture (CDC) operation, for example - '1999-01-30T12:12:12'
+    Default: ''
+  ScheduleOrOneTime:
+    Default: schedule
+    Description: Please choose between one-time migration refresh or scheduled
+    AllowedValues:
+      - one-time
+      - schedule
+    Type: String
+  CronSchedule:
+    Default: "cron(0 0 */1 * ? *)"
+    Description: Enter the schedule in cron format to schedule the migration
+    Type: String
+  ExistingDmsReplicationTaskName:
+    Type: String
+    Default: ''
+    Description: Existing replication task name
+  LatestAmiId:
+    Description: AMI for Instance (default is latest AmaLinux2)
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+  
+  MyKeypair:
+    Description: My key pair
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: "the_doctor"
+  DBName:
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: must begin with a letter and contain only alphanumeric
+      characters.
+    Default: clarusway
+    Description: The WordPress database name
+    MaxLength: '64'
+    MinLength: '1'
+    Type: String
+  DBPassword:
+    AllowedPattern: '^[A-Za-z][a-zA-Z0-9@%$_-]{8,41}$'
+    ConstraintDescription: must contain only alphanumeric characters.
+    Description: The WordPress database admin account password
+    MaxLength: '41'
+    MinLength: '8'
+    Default: 'wordpress'
+    Type: String
+  DBRootPassword:
+    AllowedPattern: '^[A-Za-z][a-zA-Z0-9@%$_-]{8,41}$'
+    ConstraintDescription: must contain only alphanumeric characters.
+    Description: MySQL root password
+    Default: 'wordpress'
+    MaxLength: '41'
+    MinLength: '8'
+    Type: String
+  DBUser:
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: must begin with a letter and contain only alphanumeric
+      characters.
+    Description: The WordPress database admin account username
+    Default: clarusway
+    MaxLength: '16'
+    MinLength: '1'
+    Type: String
+Rules:
+  DMSTaskNamePresent: 
+    RuleCondition: !Equals [ !Ref UseExistingReplicationTask, 'yes']
+    Assertions:
+      - Assert:
+          'Fn::Not':
+            - 'Fn::Equals':
+                - Ref: ExistingDmsReplicationTaskName
+                - ''
+        AssertDescription: Replication Task name must be specified if UseExistingReplicationTask is chosen as yes
+  OneTimeFullLoad:
+    RuleCondition: !Equals [ !Ref ScheduleOrOneTime, 'schedule']
+    Assertions:
+      - Assert:
+          'Fn::Not':
+            - 'Fn::Equals':
+                - Ref: MigrationRefreshType
+                - 'full-load-and-cdc'
+        AssertDescription: MigrationRefreshType must not be full-load-and-cdc if ScheduleOrOneTime is chosen to be schedule
+      - Assert:
+          'Fn::Not':
+            - 'Fn::Equals':
+                - Ref: MigrationRefreshType
+                - 'cdc'
+        AssertDescription: MigrationRefreshType must not be cdc if ScheduleOrOneTime is chosen to be schedule
+  DataRefreshFullLoad:
+    RuleCondition: !Equals [ !Ref MigrationRefreshIndicator, 'data-refresh']
+    Assertions:
+      - Assert:
+          'Fn::Equals':
+            - Ref: MigrationRefreshType
+            - 'full-load'
+        AssertDescription: MigrationRefreshType must be full-load if MigrationRefreshIndicator is chosen to be data-refresh
+  FullLoadAndCdcOneTime:
+    RuleCondition: !Equals [ !Ref MigrationRefreshType, 'full-load-and-cdc']
+    Assertions:
+      - Assert:
+          'Fn::Equals':
+            - Ref: ScheduleOrOneTime
+            - 'one-time'
+        AssertDescription: Schedule must be one-time if MigrationRefreshType is chosen to be full-load-and-cdc
+      - Assert:
+          'Fn::Not':
+            - 'Fn::Equals':
+                - Ref: CdcStartTime
+                - ''
+        AssertDescription: CdcStartTime must be non-empty if MigrationRefreshType is chosen to be full-load-and-cdc
+  CdcOneTime:
+    RuleCondition: !Equals [ !Ref MigrationRefreshType, 'cdc']
+    Assertions:
+      - Assert:
+          'Fn::Equals':
+            - Ref: ScheduleOrOneTime
+            - 'one-time'
+        AssertDescription: Schedule must be one-time if MigrationRefreshType is chosen to be cdc
+      - Assert:
+          'Fn::Not':
+            - 'Fn::Equals':
+                - Ref: CdcStartTime
+                - ''
+        AssertDescription: CdcStartTime must be non-empty if MigrationRefreshType is chosen to be cdc
+      - Assert:
+          'Fn::Not':
+            - 'Fn::Equals':
+                - Ref: StartReplicationTaskType
+                - 'reload-target'
+        AssertDescription: StartReplicationTaskType cannot be "reload-target" if MigrationRefreshType is chosen to be cdc
+Conditions:
+  ScheduledMigration:  !Equals [ !Ref ScheduleOrOneTime, 'schedule' ]
+  Migration: !Equals [ !Ref MigrationRefreshIndicator, 'data-migration']
+  Refresh: !Equals [ !Ref MigrationRefreshIndicator, 'data-refresh']
+  ResourceCreate: !Equals [ !Ref UseExistingReplicationTask, 'no']
+
+Resources:
+  resDMSTaskSchedulerEventRule: 
+    Condition: ScheduledMigration
+    Type: AWS::Events::Rule
+    Properties: 
+      Name: dmstask-scheduler-eventrule
+      Description: Cloudwatch event rule to trigger the Lambda function
+      ScheduleExpression: !Ref CronSchedule
+      State: "ENABLED"
+      Targets: 
+        - 
+          Arn: !GetAtt resDmsTaskStarterLambda.Arn
+          Id: "DatabaseCopyTrigger"
+
+  resDataProcessEventEnableLambdaRole:
+    Condition: ScheduledMigration
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: dataprocess-eventenable-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        -
+          PolicyName: "CloudWatch-Access"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - logs:CreateLogStream
+                  - logs:CreateLogGroup
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+        -
+          PolicyName: "Events-Task-Access"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:                
+              -
+                Effect: Allow
+                Action:
+                  - events:EnableRule
+                Resource: 
+                - !Join ['',['arn:aws:events:',!Ref 'AWS::Region',':',!Ref 'AWS::AccountId',':rule/dmstask-scheduler-eventrule']]                
+                
+  resDataProcessEventEnableLambda:
+    Condition: ScheduledMigration
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: dataprocess-eventenable-lambda
+      Handler: index.handler
+      Environment:
+        Variables:
+          dmstaskschedulereventrule: dmstask-scheduler-eventrule
+      Runtime: python3.6
+      Description: This function enables cloudwatch rule
+      MemorySize: 128
+      Timeout: 300
+      Role: !GetAtt resDataProcessEventEnableLambdaRole.Arn
+      Code:
+        ZipFile: |        
+          import os, boto3, logging
+          
+          log = logging.getLogger()
+          log.setLevel(logging.INFO)
+          
+          cwe_client = boto3.client('events')
+          
+          def enable_cw_eventrule():
+              
+              cwe_client.enable_rule(Name=os.environ['dmstaskschedulereventrule'])
+              log.info("Cloudwatch event enabled successfully...")
+          
+          def handler(event, context):
+              
+              sns_dms_notification_message = event['Records'][0]['Sns']['Message']
+              log.info("Message from DMS task is : {}".format(sns_dms_notification_message))
+              
+              dms_task_stop_text = 'Replication task has stopped.'
+              dms_task_stop_reason = 'FULL_LOAD_ONLY_FINISHED.'
+              
+              if dms_task_stop_text in sns_dms_notification_message:
+                  if dms_task_stop_reason in sns_dms_notification_message:
+                      log.info("Task completed successfully...")
+                      enable_cw_eventrule()
+                  else:
+                      log.info("DMS Task not stopped properly... Please check... ")
+              else:
+                  log.info("Inappropriate event...")
+
+  resDmsTaskStarterLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: dms-task-starter-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        -
+          PolicyName: "CloudWatch-Access"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - logs:CreateLogStream
+                  - logs:CreateLogGroup
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+        -
+          PolicyName: "DMS-Task-Access"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:                
+              -
+                Effect: Allow
+                Action:
+                  - dms:StartReplicationTask
+                  - dms:DescribeReplicationTasks
+                Resource: "*"
+        -
+          PolicyName: "Events-Task-Access"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:                
+              -
+                Effect: Allow
+                Action:
+                  - events:DisableRule
+                Resource: 
+                - !Join ['',['arn:aws:events:',!Ref 'AWS::Region',':',!Ref 'AWS::AccountId',':rule/dmstask-scheduler-eventrule']]                
+
+  resDmsTaskStarterLambda:
+    DependsOn:
+      - "MyReplicationTask"
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: dms-task-starter-lambda
+      Handler: index.handler
+      Environment:
+        Variables:
+          dmstaskschedulereventrule: !If [ScheduledMigration, "dmstask-scheduler-eventrule", !Ref "AWS::NoValue"]
+          dmstaskname: !If [ResourceCreate, !Ref ReplicationTaskIdentifier, !Ref ExistingDmsReplicationTaskName]
+          scheduledmigrationindicator: !Ref ScheduleOrOneTime
+          migrationrefreshtype: !Ref MigrationRefreshType
+          cdcstarttime: !Ref CdcStartTime
+          startreplicationraskrype: !Ref StartReplicationTaskType
+      Runtime: python3.6
+      Description: This function triggers the DMS task and disables the cloudwatch event rule
+      MemorySize: 128
+      Timeout: 300
+      Role: !GetAtt resDmsTaskStarterLambdaRole.Arn
+      Code:
+        ZipFile: |
+          import boto3, logging, os
+          from botocore.config import Config
+          
+          log = logging.getLogger()
+          log.setLevel(logging.INFO)
+          
+          dms_client = boto3.client('dms')
+          cwe_client = boto3.client('events')
+          lambda_client = boto3.client('lambda')
+          
+          def check_task_status(dms_task_name):
+              
+              try:
+                  task = dms_client.describe_replication_tasks(
+                      Filters=[{'Name': 'replication-task-id','Values': [dms_task_name]}])['ReplicationTasks'][0]
+
+                  log.info('Task {} status : {}...'.format(task['ReplicationTaskIdentifier'],task['Status']))
+
+                  if task['Status'] == 'stopped':
+                      log.info('Task {} {}...'.format(task['ReplicationTaskIdentifier'],task['StopReason']))            
+                  
+                  return task
+              except:
+                  log.info("ERROR checking the status of the task - {}... Please check...".format(dms_task_name))
+
+          def start_task(dms_task_name):
+              
+              try:                  
+                  dms_task_arn = dms_client.describe_replication_tasks(
+                              Filters=[{'Name': 'replication-task-id','Values': [dms_task_name]}])['ReplicationTasks'][0]["ReplicationTaskArn"]
+                  if os.environ['migrationrefreshtype'] == 'cdc' or os.environ['migrationrefreshtype'] == 'full-load-and-cdc':
+                      if os.environ['cdcstarttime'] != '':
+                          task = dms_client.start_replication_task(
+                              ReplicationTaskArn=dms_task_arn,
+                              StartReplicationTaskType=os.environ['startreplicationraskrype'],
+                              CdcStartTime=os.environ['cdcstarttime']
+                              )['ReplicationTask']
+                      else:
+                          log.info('CDC start time cannot be empty for this migration type involving CDC...')
+                  else:
+                      task = dms_client.start_replication_task(
+                          ReplicationTaskArn=dms_task_arn,
+                          StartReplicationTaskType=os.environ['startreplicationraskrype'],
+                          )['ReplicationTask']
+
+                      log.info('Task {} has started successfully...'.format(task['ReplicationTaskIdentifier']))    
+                      return task['Status']         
+              except:
+                  log.info("ERROR starting the DMS task - {}... Please check...".format(dms_task_name))
+          
+          def disable_cw_eventrule(event_rule_name):
+              
+              try:
+                  cwe_client.disable_rule(Name=event_rule_name)
+                  log.info('Cloud watch event rule disabled successfully...')
+                  return True
+              except:
+                  log.info('ERROR disabling cloud watch event rule - {}... Please check...'.format(event_rule_name))
+                  return False
+          
+          def handler(event, context):
+              
+              dms_task_name = os.environ['dmstaskname']
+              task_stop_status = ['stopped','failed','ready']
+              
+              task_status = check_task_status(dms_task_name)
+              if task_status['MigrationType'] != os.environ['migrationrefreshtype']:
+                log.info('DMS Task MigrationType - "{}" did not match with the chosen MigrationRefreshType value "{}"'.format(task_status['MigrationType'],os.environ['migrationrefreshtype']))
+              else:
+                if task_status['Status'] in task_stop_status:
+                  log.info('DMS Task in stopped status... Proceeding to start the replication...')
+                  if os.environ['scheduledmigrationindicator'] == 'schedule':
+                    event_rule_name = os.environ['dmstaskschedulereventrule']
+                    if disable_cw_eventrule(event_rule_name):
+                      start_task(dms_task_name)
+                  else:
+                    start_task(dms_task_name)
+                else:
+                  log.info('DMS Task - {} not in stopped status... Please check...'.format(dms_task_name))
+                        
+  resPermissionForEventsToInvokeLambda: 
+    Condition: ScheduledMigration
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !Ref resDmsTaskStarterLambda
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: 
+        Fn::GetAtt: 
+          - "resDMSTaskSchedulerEventRule"
+          - "Arn"
+          
+  resPermissionForSnsToInvokeLambda: 
+    Condition: ScheduledMigration
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !Ref resDataProcessEventEnableLambda
+      Action: "lambda:InvokeFunction"
+      Principal: "sns.amazonaws.com"
+      SourceArn: !Ref resSnsTopicForDms
+
+  resSnsTopicForDms: 
+    Condition: ScheduledMigration
+    Type: AWS::SNS::Topic
+    Properties: 
+      TopicName: dms-task-statechange-topic
+      Subscription: 
+        - 
+          Endpoint: !GetAtt resDataProcessEventEnableLambda.Arn
+          Protocol: "lambda"
+          
+  resDmsTaskSubscription:
+    Condition: ScheduledMigration
+    DependsOn:
+      - "MyReplicationTask"
+    Type: AWS::DMS::EventSubscription
+    Properties:
+      SubscriptionName: dmstasksubscription
+      Enabled: true
+      SourceType: replication-task
+      EventCategories:
+        - state change
+      SnsTopicArn: !Ref resSnsTopicForDms
+      SourceIds:
+        - !If [ResourceCreate, !Ref ReplicationTaskIdentifier, !Ref ExistingDmsReplicationTaskName]
+
+  onpremVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 192.168.10.0/24
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: onpremVPC
+  onpremInternetGateway:
+    Type: 'AWS::EC2::InternetGateway'
+    Properties:
+      Tags:
+      - Key: Name
+        Value: onpremIGW
+  onpremInternetGatewayAttachment:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref onpremVPC
+      InternetGatewayId: !Ref onpremInternetGateway
+  onpremPublicRouteTable: 
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref onpremVPC
+      Tags:
+      - Key: Name
+        Value: onpremPublicRT
+  onpremDefaultV4Route: 
+    Type: 'AWS::EC2::Route'
+    DependsOn: onpremInternetGatewayAttachment
+    Properties:
+      RouteTableId:
+        Ref: onpremPublicRouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId:
+        Ref: onpremInternetGateway
+  onpremPublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref onpremVPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: 192.168.10.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: onprem-public
+  onpremPublicRouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref onpremPublicSubnet
+      RouteTableId:
+        Ref: onpremPublicRouteTable
+  onpremSecurityGroupWeb:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref onpremVPC
+      GroupDescription: Control access to the Web EC2 Instance
+      SecurityGroupIngress: 
+        - Description: 'Allow HTTP IPv4 IN'
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: '0.0.0.0/0'
+        - Description: 'Allow HTTP IPv4 IN'
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: '0.0.0.0/0'
+  onpremSecurityGroupDB:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref onpremVPC
+      GroupDescription: Control access to the DB EC2 Instance
+      SecurityGroupIngress: 
+        - Description: 'Allow MySQL IPv4 IN'
+          IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: '0.0.0.0/0'
+        - Description: 'Allow HTTP IPv4 IN'
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: '0.0.0.0/0'
+  onpremRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  onpremInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref onpremRole
+  onpremCatWeb:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: "t2.micro"
+      ImageId: "ami-01830c52e4dd62fa9"
+      KeyName: !Ref MyKeypair
+      IamInstanceProfile: !Ref onpremInstanceProfile
+      SubnetId: !Ref onpremPublicSubnet
+      SecurityGroupIds: 
+        - !Ref onpremSecurityGroupWeb
+      Tags:
+        - Key: Name
+          Value: CatWeb
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          # Configure Wordpress
+          yum update -y
+          yum install git -y
+          cd /home/ec2-user
+          wget https://archives.fedoraproject.org/pub/archive/epel/6/x86_64/epel-release-6-8.noarch.rpm
+          rpm -ivh epel-release-6-8.noarch.rpm
+          yum --enablerepo=epel -y install sshpass
+          cd /var/www/html
+          cp ./wp-config-sample.php ./wp-config.php
+          sed -i "s/'localhost'/'${onpremCatDB.PrivateIp}'/g" wp-config.php
+          sed -i "s/'database_name_here'/'${DBName}'/g" wp-config.php
+          sed -i "s/'username_here'/'${DBUser}'/g" wp-config.php
+          sed -i "s/'password_here'/'${DBPassword}'/g" wp-config.php
+
+          cat >> /home/ec2-user/update_wp_ip.sh<< 'EOF'
+          #!/bin/bash
+          source <(php -r 'require("/var/www/html/wp-config.php"); echo("DB_NAME=".DB_NAME."; DB_USER=".DB_USER."; DB_PASSWORD=".DB_PASSWORD."; DB_HOST=".DB_HOST); ')
+          SQL_COMMAND="mysql -u $DB_USER -h $DB_HOST -p$DB_PASSWORD $DB_NAME -e"
+          OLD_URL=$(mysql -u $DB_NAME -h $DB_HOST -p$DB_PASSWORD $DB_NAME -e 'select option_value from wp_options where option_id = 1;' | grep http)
+          HOST=$(curl http://169.254.169.254/latest/meta-data/public-hostname)
+          $SQL_COMMAND "UPDATE wp_options SET option_value = replace(option_value, '$OLD_URL', 'http://$HOST') WHERE option_name = 'home' OR option_name = 'siteurl';"
+          $SQL_COMMAND "UPDATE wp_posts SET guid = replace(guid, '$OLD_URL','http://$HOST');"
+          $SQL_COMMAND "UPDATE wp_posts SET post_content = replace(post_content, '$OLD_URL', 'http://$HOST');"
+          $SQL_COMMAND "UPDATE wp_postmeta SET meta_value = replace(meta_value,'$OLD_URL','http://$HOST');"
+          EOF
+
+          chmod 755 /home/ec2-user/update_wp_ip.sh
+          chown root /etc/rc.local
+          chmod 755 /etc/rc.local
+          echo "/home/ec2-user/update_wp_ip.sh" >> /etc/rc.local
+          /home/ec2-user/update_wp_ip.sh
+          
+          cd /var/www/
+          sshpass -p "${DBPassword}" scp -o StrictHostKeyChecking=no -rp html ec2-user@${awsCatWeb.PrivateIp}:/home/ec2-user
+          
+          
+  
+  onpremCatDB:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+    Properties:
+      InstanceType: "t2.micro"
+      KeyName: !Ref MyKeypair
+      ImageId: "ami-08fa2f21134ce466b"
+      IamInstanceProfile: !Ref onpremInstanceProfile
+      SubnetId: !Ref onpremPublicSubnet
+      SecurityGroupIds: 
+        - !Ref onpremSecurityGroupDB
+      Tags:
+        - Key: Name
+          Value: CatDB
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource onpremCatDB --region ${AWS::Region}
+  awsVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.16.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: awsVPC
+  awsInternetGateway:
+    Type: 'AWS::EC2::InternetGateway'
+    Properties:
+      Tags:
+      - Key: Name
+        Value: awsIGW
+  awsInternetGatewayAttachment:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref awsVPC
+      InternetGatewayId: !Ref awsInternetGateway
+  awsPublicRouteTable: 
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref awsVPC
+      Tags:
+      - Key: Name
+        Value: awsPublicRT
+  awsPrivateRouteTable: 
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref awsVPC
+      Tags:
+      - Key: Name
+        Value: awsPrivateRT
+  awsDefaultV4Route: 
+    Type: 'AWS::EC2::Route'
+    DependsOn: awsInternetGatewayAttachment
+    Properties:
+      RouteTableId:
+        Ref: awsPublicRouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId:
+        Ref: awsInternetGateway
+  awsPublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref awsVPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: 10.16.48.0/20
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: aws-publicA
+  awsPublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref awsVPC
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      CidrBlock: 10.16.112.0/20
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: aws-publicB
+  awsPrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref awsVPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: 10.16.32.0/20
+      Tags:
+        - Key: Name
+          Value: aws-privateA
+  awsPrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref awsVPC
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      CidrBlock: 10.16.96.0/20
+      Tags:
+        - Key: Name
+          Value: aws-privateB
+  awsPublicARouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref awsPublicSubnetA
+      RouteTableId:
+        Ref: awsPublicRouteTable
+  awsPublicBRouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref awsPublicSubnetB
+      RouteTableId:
+        Ref: awsPublicRouteTable
+  awsPrivateARouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref awsPrivateSubnetA
+      RouteTableId:
+        Ref: awsPrivateRouteTable
+  awsPrivateBRouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref awsPrivateSubnetB
+      RouteTableId:
+        Ref: awsPrivateRouteTable
+  awsSecurityGroupWeb:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref awsVPC
+      GroupDescription: Control access to the Web EC2 Instance
+      SecurityGroupIngress: 
+        - Description: 'Allow HTTP IPv4 IN'
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: '0.0.0.0/0'
+        - Description: 'Allow SSH IPv4 IN'
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: '0.0.0.0/0'
+        - Description: 'Allow MySQL IPv4 IN'
+          IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: '0.0.0.0/0'
+  awsSecurityGroupDB:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref awsVPC
+      GroupDescription: Control access to the DB EC2 Instance
+      SecurityGroupIngress: 
+        - Description: 'Allow MySQL IPv4 IN'
+          IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: '0.0.0.0/0'
+  awsRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+  awsInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref awsRole
+
+  MyPeering:
+    Type: AWS::EC2::VPCPeeringConnection
+    Properties:
+      PeerVpcId: !Ref onpremVPC #required
+      VpcId: !Ref awsVPC #required
+
+  PeeringonpremPublic:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      DestinationCidrBlock: 10.16.0.0/16
+      RouteTableId: !Ref onpremPublicRouteTable
+      VpcPeeringConnectionId: !Ref MyPeering
+  
+  PeeringawsPublicRT:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      DestinationCidrBlock: 192.168.10.0/24
+      RouteTableId: !Ref awsPublicRouteTable
+      VpcPeeringConnectionId: !Ref MyPeering
+
+  PeeringawsPrivateRT:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      DestinationCidrBlock: 192.168.10.0/24
+      RouteTableId: !Ref awsPrivateRouteTable
+      VpcPeeringConnectionId: !Ref MyPeering
+
+  MyDBSecurityGroup:
+    Type: "AWS::RDS::DBSecurityGroup"
+    Properties:
+      DBSecurityGroupIngress: #required
+        - EC2SecurityGroupId: !GetAtt awsSecurityGroupWeb.GroupId
+      EC2VpcId: !Ref awsVPC
+      GroupDescription: Security group for RDS DB Instance. #required
+
+  MyDBSubnetGroup:
+    Type: 'AWS::RDS::DBSubnetGroup'
+    Properties:
+      DBSubnetGroupDescription: Subnets available for the RDS DB Instance
+      SubnetIds:
+        - !Ref awsPrivateSubnetA
+        - !Ref awsPrivateSubnetB
+  
+  MyDatabaseServer:
+    Type: "AWS::RDS::DBInstance"
+    DeletionPolicy: Delete
+    Properties:
+      AllocatedStorage: "20"
+      AllowMajorVersionUpgrade: false
+      AutoMinorVersionUpgrade: true
+      BackupRetentionPeriod: 0
+      DBInstanceClass: db.t2.micro #required
+      DBName: !Ref DBName 
+      DBSubnetGroupName: !Ref MyDBSubnetGroup
+      DeleteAutomatedBackups: true
+      DeletionProtection: false
+      DBSecurityGroups:
+        - !Ref MyDBSecurityGroup
+      Engine: MariaDB
+      EngineVersion: "10.4"
+      MasterUserPassword: !Ref DBPassword
+      MasterUsername: !Ref DBUser
+      MaxAllocatedStorage: 30
+      PreferredBackupWindow: 03:00-04:00
+      MultiAZ: false
+      Port: "3306"
+      VPCSecurityGroups:
+        - !Ref MyDBSecurityGroup
+
+  awsCatWeb:
+    DependsOn:
+      - "MyDatabaseServer"
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: "t2.micro"
+      ImageId: "ami-0be2609ba883822ec"
+      KeyName: !Ref MyKeypair
+      SubnetId: !Ref awsPublicSubnetA
+      SecurityGroupIds: 
+        - !Ref awsSecurityGroupWeb
+      Tags:
+        - Key: Name
+          Value: awsCatWeb
+      UserData:
+        Fn::Base64: 
+          !Sub 
+            - |
+              #!/bin/bash -xe
+              yum update -y
+              yum install -y httpd mariadb
+              amazon-linux-extras install -y php7.2
+              systemctl start httpd
+              systemctl enable httpd
+              sed -ie 's/PasswordAuthentication no/PasswordAuthentication yes/g' /etc/ssh/sshd_config
+              echo '${DBPassword}' | passwd ec2-user --stdin
+              systemctl restart sshd.service
+              sleep 300
+              cd /home/ec2-user/html
+              cp * -R /var/www/html/
+              usermod -a -G apache ec2-user   
+              chown -R ec2-user:apache /var/www
+              chmod 2775 /var/www
+              find /var/www -type d -exec chmod 2775 {} \;
+              find /var/www -type f -exec chmod 0664 {} \;
+              systemctl restart httpd
+              cd /var/www/html
+              sed -i "s/'${onpremCatDB.PrivateIp}'/'${MyDBURI}'/g" wp-config.php
+
+              sleep 100
+              cat >> /home/ec2-user/update_wp_ip.sh<< 'EOF'
+              #!/bin/bash
+              source <(php -r 'require("/var/www/html/wp-config.php"); echo("DB_NAME=".DB_NAME."; DB_USER=".DB_USER."; DB_PASSWORD=".DB_PASSWORD."; DB_HOST=".DB_HOST); ')
+              SQL_COMMAND="mysql -u $DB_USER -h $DB_HOST -p$DB_PASSWORD $DB_NAME -e"
+              OLD_URL=$(mysql -u $DB_NAME -h $DB_HOST -p$DB_PASSWORD $DB_NAME -e 'select option_value from wp_options where option_id = 1;' | grep http)
+              HOST=$(curl http://169.254.169.254/latest/meta-data/public-hostname)
+              $SQL_COMMAND "UPDATE wp_options SET option_value = replace(option_value, '$OLD_URL', 'http://$HOST') WHERE option_name = 'home' OR option_name = 'siteurl';"
+              $SQL_COMMAND "UPDATE wp_posts SET guid = replace(guid, '$OLD_URL','http://$HOST');"
+              $SQL_COMMAND "UPDATE wp_posts SET post_content = replace(post_content, '$OLD_URL', 'http://$HOST');"
+              $SQL_COMMAND "UPDATE wp_postmeta SET meta_value = replace(meta_value,'$OLD_URL','http://$HOST');"
+              $SQL_COMMAND "ALTER TABLE wp_termmeta CHANGE meta_id meta_id  BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT;"
+              $SQL_COMMAND "ALTER TABLE wp_terms CHANGE term_id term_id  BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT;"
+              $SQL_COMMAND "ALTER TABLE wp_term_taxonomy CHANGE term_taxonomy_id term_taxonomy_id  BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT;"
+              $SQL_COMMAND "ALTER TABLE wp_commentmeta CHANGE meta_id meta_id  BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT;"
+              $SQL_COMMAND "ALTER TABLE wp_comments CHANGE comment_ID comment_ID  BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT;"
+              $SQL_COMMAND "ALTER TABLE wp_links CHANGE link_id link_id  BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT;"
+              $SQL_COMMAND "ALTER TABLE wp_options CHANGE option_id option_id  BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT;"
+              $SQL_COMMAND "ALTER TABLE wp_postmeta CHANGE meta_id meta_id  BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT;"
+              $SQL_COMMAND "ALTER TABLE wp_users CHANGE ID ID  BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT;"
+              $SQL_COMMAND "ALTER TABLE wp_posts CHANGE ID ID  BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT;"
+              $SQL_COMMAND "ALTER TABLE wp_usermeta CHANGE umeta_id umeta_id  BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT;"
+              EOF
+
+              chmod 755 /home/ec2-user/update_wp_ip.sh
+              chown root /etc/rc.local
+              chmod 755 /etc/rc.local
+              echo "/home/ec2-user/update_wp_ip.sh" >> /etc/rc.local
+              /home/ec2-user/update_wp_ip.sh
+
+            - MyDBURI: !GetAtt MyDatabaseServer.Endpoint.Address
+
+
+  MyReplicationSubnetGroup:
+    Type: AWS::DMS::ReplicationSubnetGroup
+    Properties: 
+      ReplicationSubnetGroupDescription: Subnets available for the DMS DB Instance
+      SubnetIds: 
+        - !Ref awsPrivateSubnetA
+        - !Ref awsPrivateSubnetB
+
+
+  
+  MyReplicationInstance:
+    Type: "AWS::DMS::ReplicationInstance"
+    Properties: 
+      EngineVersion: 3.4.3
+      MultiAZ: false
+      PreferredMaintenanceWindow: Sun:23:45-Mon:00:15
+      PubliclyAccessible: false
+      ReplicationInstanceClass: dms.t3.micro
+      ReplicationSubnetGroupIdentifier: !Ref MyReplicationSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref awsSecurityGroupWeb
+
+
+  MyReplicationSourceInstanceEndpoint:
+    Type: AWS::DMS::Endpoint
+    DependsOn:
+      - "MyReplicationInstance"
+    Properties:
+      DatabaseName: !Ref DBName
+      EndpointType: source #required
+      EngineName: "mariadb" #required
+      Password: !Ref DBPassword
+      Port: 3306
+      ServerName: !GetAtt onpremCatDB.PrivateIp
+      Username: !Ref DBName
+
+  MyReplicationTargetInstanceEndpoint:
+    Type: AWS::DMS::Endpoint
+    DependsOn:
+      - "MyReplicationInstance"
+    Properties:
+      DatabaseName: !Ref DBName
+      EndpointType: target #required
+      EngineName: "mariadb" #required
+      Password: !Ref DBPassword
+      Port: 3306
+      ServerName: !GetAtt MyDatabaseServer.Endpoint.Address
+      Username: !Ref DBName
+
+  MyReplicationTask:
+    Type: AWS::DMS::ReplicationTask
+    Properties:
+      MigrationType: full-load #required
+      ReplicationTaskIdentifier: !Ref ReplicationTaskIdentifier
+      ReplicationInstanceArn: !Ref MyReplicationInstance  #required
+      SourceEndpointArn: !Ref MyReplicationSourceInstanceEndpoint #required
+      ReplicationTaskSettings: "{
+          \"ValidationSettings\":   {
+            \"EnableValidation\":true
+          },
+          \"Logging\": {
+            \"EnableLogging\": true
+          }
+      }"
+      TableMappings: "{ \"rules\": [ { \"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-name\": \"1\", \"object-locator\": { \"schema-name\": \"%\", \"table-name\": \"%\" }, \"rule-action\": \"include\" } ] }" #required
+      TargetEndpointArn: !Ref MyReplicationTargetInstanceEndpoint #required
+
+
+Outputs:
+  WebsiteURL:
+    Value: !Sub
+      - http://${PublicAddress}
+      - PublicAddress: !GetAtt onpremCatWeb.PublicDnsName
+    Description: DMS Application URL
+  awsWebsiteURL:  
+    Value: !Sub
+      - http://${PublicAddress}
+      - PublicAddress: !GetAtt awsCatWeb.PublicDnsName
+    Description: DMS Application URL
+ 

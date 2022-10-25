@@ -1,0 +1,50 @@
+version: "3.7"
+
+services:
+  database:
+    image: mysql:5.7
+    secrets:
+      - db_root_password
+      - db_dba_password
+    environment:
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+      MYSQL_DATABASE: phonebook_db
+      MYSQL_USER: admin
+      MYSQL_PASSWORD_FILE: /run/secrets/db_dba_password
+    volumes:
+      - db-data:/var/lib/mysql
+    networks:
+      - clarusnet
+    configs:
+      - source: initialdatabase
+        target: /docker-entrypoint-initdb.d/init.sql
+
+  app-server:
+    image: "${ECR_REGISTRY}/${APP_REPO_NAME}:latest"
+    deploy:
+      mode: global
+      update_config:
+        parallelism: 2
+        delay: 5s
+        order: start-first
+    ports:
+      - "80:80"
+    networks:
+      - clarusnet
+
+networks:
+  clarusnet:
+    driver: overlay
+
+volumes:
+  db-data:
+
+secrets:
+  db_root_password:
+    file: database/db_root_password.txt
+  db_dba_password:
+    file: database/db_dba_password.txt
+
+configs:
+  initialdatabase:
+      file: ./init.sql

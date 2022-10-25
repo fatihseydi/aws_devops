@@ -1,0 +1,7 @@
+aws ssm create-activation \
+  --default-instance-name MyWebServers \
+  --description "Activation for Finance department webservers" \
+  --iam-role service-role/AmazonEC2RunCommandRoleForManagedInstances \
+  --registration-limit 10 \
+  --region us-east-1 \
+  --tags "Key=Department,Value=Finance"
